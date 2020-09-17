@@ -2,9 +2,10 @@ from __future__ import print_function
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from torch.autograd import Variable
 import collections
+import itertools, random
 import os,sys
 import argparse
 from modules import *
@@ -18,6 +19,7 @@ parser.add_argument('--X',  help='directory to ground truth X')
 parser.add_argument('--C',  help='directory to ground truth C')
 parser.add_argument('--Y',  help='directory to ground truth Y')
 parser.add_argument('--r', default=3, type=int, help='rank - number of clusters')
+parser.add_argument('--run', default=0, type=int, help='run index, the results are saved in the path results_run/...')
 args = parser.parse_args()
 
 D = np.loadtxt(open(args.data, "rb"), delimiter=",")
@@ -28,146 +30,67 @@ m,n = D.shape
 r = args.r
 
 print('The loss of the ground truth is {:.5f}'.format(np.mean((D-Y@C@X.T)**2)))
-bs = int(n*m*30/100) #originally 10%
-train_loader = DataLoader(DataMatrix(D), batch_size=bs, shuffle=True)
-test_loader = DataLoader(DataMatrix(Y@C@X.T), batch_size=bs)
+i_loader = DataLoader(TensorDataset(torch.arange(0,n)),batch_size=int(n/10),shuffle=True)
+j_loader = DataLoader(TensorDataset(torch.arange(0,m)),batch_size=int(m/10),shuffle=True)
 
 #
-# stepsizes 
+# Helpers
 #
-def stepsizeX(model,batch):
-  with torch.no_grad():
-    if batch is None:
-      YC = torch.matmul(model.Y.weight,model.C.weight)
-      L = 2*torch.sqrt((torch.matmul(torch.transpose(YC,0,1),YC)**2).sum())/n/m
-    else:
-      n_array.fill_(0)
-      YC = torch.matmul(model.Y.weight,model.C.weight)
-      y = (YC**2).sum(1)[batch[:,0]]
-      n_array.index_add_(0,batch[:,1],y)
-      L= n_array.max().item()/bs*2
-    return 1/2/max(L,0.001)
-def stepsizeY(model,batch):
-  with torch.no_grad():
-    if batch is None:
-      XCt = torch.matmul(model.X.weight,torch.transpose(model.C.weight,0,1))
-      L = 2*torch.sqrt((torch.matmul(torch.transpose(XCt,0,1),XCt)**2).sum())/n/m
-    else:
-      m_array.fill_(0)
-      XCt = torch.matmul(model.X.weight,torch.transpose(model.C.weight,0,1))
-      x = (XCt**2).sum(1)[batch[:,1]]
-      m_array.index_add_(0,batch[:,0],x)
-      L= m_array.max().item()/bs*2
-    return 1/2/max(L,0.001)
-def stepsizeC(model,batch):
-  with torch.no_grad():
-    if batch is None:
-      L = 2*(model.X.weight**2).sum()*(model.Y.weight**2).sum()/n/m
-    else:
-      x = (model.X.weight**2).sum(1)[batch[:,1]]
-      y = (model.Y.weight**2).sum(1)[batch[:,0]]
-      L = torch.dot(x,y).item()
-      L = L/bs*2
-    return 1/2/max(L,0.001)
+def select_batch_J(J,I):
+  return J, None
+def select_batch_I(J,I):
+  return None, I
+def select_batch_none(J,I):
+  return None, None
+def get_target(J,I):
+  if I is None and J is None:
+    return D_full
+  elif J is None:
+    return D_full[:,I]
+  else:
+    return D_full[J,:]
 
 #
-# prox operators
+# the binary penalizing function phi
 #
 def phi(x):
+    if x.max() >1 or x.min() <0:
+      raise Exception("Someone did not prox properly")
     return 1-torch.abs(1-2*x)
-def prox_binary_(x,lambdas,lr,alpha=-1e-8):
-  with torch.no_grad():
-    idx_up = x>0.5
-    idx_down = x<=0.5
-    x[idx_up] += 2*lr*lambdas[idx_up]
-    x[idx_down] -= 2*lr*lambdas[idx_down]
-    x[x>1] = 1
-    x[x<0] = 0
-    lambdas.add_(phi(x)-1,alpha=alpha)
-def prox_pos_(X,weight,lr,alpha=0):
-  with torch.no_grad():
-    X[X<0] = 0
+
 #
-# train batch
+# train batch-wise
 #
-def train(epoch,alpha):
+def train(epoch):
   model.train()
-  model_prev.train()
   cum_loss = 0.
-  for batch_idx, (data, target) in enumerate(train_loader):
-      lr_mean, lambda_mean =0,0
-      if cuda:
-        data, target = data.cuda(), target.cuda()
-      data, target = Variable(data), Variable(target.double())
-      
+  batches = itertools.zip_longest(j_loader,i_loader)
+  for batch_idx, (J,I) in enumerate(batches):
+      J,I =J[0],I[0]
+      lr_mean = 0
       for group in param_list:
+        J_, I_ = group["batch"](J,I)
         optimizer = group["optimizer"]
         optParam = optimizer.param_groups[0]
         stepsize = group["step"]
         optimizer.zero_grad()
-        output = model(data)
-        output_prev = model_prev(data)
+        target = get_target(J_,I_)
+        output = model(J_,I_)
         loss = loss_func(output, target)
-        loss_prev = loss_func(output_prev, target)
         loss.backward()
-        loss_prev.backward()
-        optParam['lr'] =stepsize(model,data)#/2
+        optParam['lr'] =stepsize(J,I)
         lr_mean += optParam['lr']
         optimizer.step()
         if "prox" in group:
             prox = group["prox"]
-            #The whole factor matrix is proxed for one batch? 
-            #Most of the time, this is ok because not often there is no tupel for one row/column.
-            prox(optParam['params'][0].data,group["lambda"],optParam['lr'], alpha=alpha) 
-            lambda_mean += torch.mean(group["lambda"])
-        cum_loss+=loss.item()/3
-        if batch_idx % 2 +1 == 0:
-            print('Train Epoch:\t\t\t {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader),
-                100. * batch_idx / len(train_loader), loss.item()))
-  if epoch % 5 == 0:
+            prox(optParam['lr'], None, None)
+        cum_loss+=loss.item()/len(param_list)
+  if epoch % 25 == 0:
     print('==Train Epoch:\t\t\t {} \tLoss: {:.6f}\t lambda: {:.3e}\t lr: {:.3f}'.format(
-        epoch, cum_loss/len(train_loader),lambda_mean/2,lr_mean/3))
+        epoch, cum_loss/len(j_loader),(torch.mean(model.lambdasX)+torch.mean(model.lambdasY))/2,lr_mean/4))
+  return cum_loss/len(j_loader)
 
-#
-# Train full grad
-#
-def train_full_grad(epoch,alpha):
-  model.train()
-  cum_loss = 0.
-  lambda_mean, lr_mean=0,0
-  #for every factor matrix - optimizer
-  for group in param_list:
-      optimizer = group["optimizer"]
-      optimizer.grad_buff =None #Sign that we do a full grad update
-      optimizer.zero_grad()
-      optParam = optimizer.param_groups[0]
-      stepsize = group["step"]
-      for batch_idx, (data, target) in enumerate(train_loader):
-          if cuda:
-            data, target = data.cuda(), target.cuda()
-          data, target = Variable(data), Variable(target.double())
-            
-          output = model(data)
-          # loss is mean squared error over a batch 
-          loss = loss_func_full(output, target)/n/m
-          loss.backward()
-          cum_loss+=loss.item()
-      # gamma = 1/(2L), L is normalized with bs but this is a full grad update  
-      optParam['lr'] =stepsize(model,None)#/2 #TODO stepsize is computed for one batch! 
-      lr_mean+= optParam['lr']
-      optimizer.step()
-      if "prox" in group:
-          prox = group["prox"]
-          prox(optParam['params'][0].data,group["lambda"],optParam['lr'], alpha=alpha) 
-          lambda_mean += torch.mean(group["lambda"])
-      if batch_idx % 2 +1 == 0:
-          print('Train Full Grad Batch:\t {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader),
-                100. * batch_idx / len(train_loader), loss.item()))
-  if epoch % 5 == 0:
-    print('==Train Full Grad Epoch:\t {} \tLoss: {:.6f}\t lambda: {:.3e}\t lr: {:.3f}'.format(
-        epoch, cum_loss/3,lambda_mean/2,lr_mean/3))
+
 #
 # Test
 #
@@ -175,78 +98,79 @@ def test():
     model.eval()
     test_loss = 0
     correct = 0
-    for data, target in test_loader:
-        if cuda:
-            data, target = data.cuda(), target.cuda()
-        data, target = Variable(data), Variable(target)
-
-        output = model(data)
+    for batch_idx, J in enumerate(j_loader):
+        J = J[0]
+        target = D_true[J,:]
+        output = model(J, None)
         # sum up batch loss
         test_loss += loss_func(output, target).item()
 
-    test_loss /= len(test_loader)
+    test_loss /= len(j_loader)
     print('\nTest set: Average loss: {:.4f}\n'.format(test_loss))
-
-
-def is_binary(A):
-  return ((A<1) *(A>0)).sum().item() == 0
-
-#
-# Do the stuff
-#
-model = MatrixFactorization(m, n, r=r)
-model.to(dev)
-model_prev = MatrixFactorization(m, n, r=r)
-model_prev.to(dev)
-
-optimizerY = SARAH([model.Y.weight],[model_prev.Y.weight], lr=0.1) # learning rate
-optimizerX = SARAH([model.X.weight],[model_prev.X.weight], lr=0.1) # learning rate
-optimizerC = SARAH([model.C.weight],[model_prev.C.weight], lr=0.1)
-
-lambdasY = torch.zeros_like(model.Y.weight) #TODO is prev_model also proxed?
-lambdasX = torch.zeros_like(model.X.weight)
-
-param_list = [{'optimizer': optimizerX, 'step': stepsizeX, 'prox':prox_binary_, 'lambda':lambdasX},
-              {'optimizer': optimizerY, 'step': stepsizeY, 'prox':prox_binary_, 'lambda':lambdasY},
-              {'optimizer': optimizerC, 'step': stepsizeC, 'prox':prox_pos_, 'lambda':torch.tensor([0.0])}]
-n_array = torch.zeros(n).double().to(dev)
-m_array = torch.zeros(m).double().to(dev)
-
-loss_func = torch.nn.MSELoss()
-loss_func_full = torch.nn.MSELoss(reduction='sum')
-epoch = 1
-test()
-alpha=-1e-9
-#alpha = -1/n/m/len(train_loader)/10
-thresh=0.1
-full_grad_prob=0.3
-#while not is_binary(model.Y.fact.weight.data) or not is_binary(model.X.fact.weight.data):
-while not is_binary(model.Y.weight.data) or not is_binary(model.X.weight.data):
-    full_batch_grad = np.random.binomial(1,full_grad_prob)
-    if full_batch_grad:
-      train_full_grad(epoch,alpha)
-    else:
-      train(epoch,alpha)
-    if epoch % 10 == 0:
-      #phiX, phiY = torch.mean(phi(model.X.fact.weight.data)), torch.mean(phi(model.Y.fact.weight.data))
-      phiX, phiY = torch.mean(phi(model.X.weight.data)), torch.mean(phi(model.Y.weight.data))
-      print('--\t\t\tphi(X):\t {:.3f} \tphi(Y): {:.3f}'.format(phiX,phiY))
-      if max(phiX,phiY) < thresh or min(phiX,phiY)<thresh/2:
-        alpha*=10
-        thresh/=2
-    epoch+=1
-    if epoch % 50 == 0:
-      test()
-    sys.stdout.flush()
-test()
 
 #
 # Write out
 #
-res_path = 'results/'+args.Y.split('/',1)[1].rsplit('/',1)[0]
-if not os.path.exists(res_path):
-    os.makedirs(res_path)
-np.savetxt('results/'+args.Y.split('/',1)[1],model.Y.weight.data.cpu().numpy(),delimiter=',',fmt='%.0f')
-np.savetxt('results/'+args.X.split('/',1)[1],model.X.weight.data.cpu().numpy(),delimiter=',',fmt='%.0f')
-np.savetxt('results/'+args.C.split('/',1)[1],model.C.weight.data.cpu().numpy(),delimiter=',',fmt='%.5f')
+def writeMF():
+    res_path = 'results/'+args.Y.split('/',1)[1].rsplit('/',1)[0]+'/run'+str(args.run)+'/'
+    if not os.path.exists(res_path):
+        os.makedirs(res_path)
+    np.savetxt(res_path + args.Y.rsplit('/',1)[1],model.Y.weight.data.cpu().numpy(),delimiter=',',fmt='%.0f')
+    np.savetxt(res_path + args.X.rsplit('/',1)[1],model.X.weight.data.cpu().numpy(),delimiter=',',fmt='%.0f')
+    np.savetxt(res_path + args.C.rsplit('/',1)[1],D.max()*model.C.weight.data.cpu().numpy(),delimiter=',',fmt='%.5f')
+
+
+#
+# Do the stuff
+#
+alphaY = -1e-8/len(i_loader)
+alphaX = -1e-8/len(j_loader)
+model = MatrixFactorization(m, n, r=r, alphaX=alphaX, alphaY=alphaY, max_C=1)
+model.to(dev)
+
+D_full = torch.from_numpy(D).float()/D.max()
+D_full = D_full.to(dev)
+D_true = torch.from_numpy(Y@C@X.T).float()/D.max()
+D_true = D_true.to(dev)
+
+optimizerY = torch.optim.SGD([model.Y.weight], lr=0.1) # learning rate
+optimizerX = torch.optim.SGD([model.X.weight], lr=0.1) # learning rate
+optimizerC = torch.optim.SGD([model.C.weight], lr=0.1)
+param_list = [{'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C, 'batch': select_batch_J},
+              {'optimizer': optimizerX, 'step': model.stepsizeX, 'prox':model.prox_binary_X, 'batch': select_batch_J},
+              {'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C, 'batch':select_batch_I},
+              {'optimizer': optimizerY, 'step': model.stepsizeY, 'prox':model.prox_binary_Y, 'batch': select_batch_I}]
+
+loss_func = torch.nn.MSELoss()
+epoch = 1
+test()
+phiX=phiY=1
+loss, best_loss = 0, 10000000
+candidate=0
+while phiX+phiY or candidate<5:
+    loss = train(epoch)
+    if epoch % 50 == 0:
+      with torch.no_grad():
+        phiX, phiY = torch.mean(phi(model.X.weight)), torch.mean(phi(model.Y.weight))
+        print('--\t\t\tphi(X):\t {:.3f} \tphi(Y): {:.3f}'.format(phiX,phiY))
+        if not phiX+phiY:
+            candidate+=1
+            print("CANDIDATE")
+            if loss<best_loss:
+                best_loss = loss
+                writeMF()
+                print("WRITE (the loss is {:.5f})".format(loss))
+                test()
+    if epoch % 100 == 0:
+        test()
+        sys.stdout.flush()
+
+    if epoch ==5000:
+        with torch.no_grad():
+            model.X.weight.round_()
+            model.Y.weight.round_()
+            param_list = [{'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C,    'batch' : select_batch_J},
+                          {'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C,    'batch' : select_batch_I}]
+    epoch+=1
+
 
