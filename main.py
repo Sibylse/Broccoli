@@ -117,7 +117,7 @@ def writeMF():
         os.makedirs(res_path)
     np.savetxt(res_path + args.Y.rsplit('/',1)[1],model.Y.weight.data.cpu().numpy(),delimiter=',',fmt='%.0f')
     np.savetxt(res_path + args.X.rsplit('/',1)[1],model.X.weight.data.cpu().numpy(),delimiter=',',fmt='%.0f')
-    np.savetxt(res_path + args.C.rsplit('/',1)[1],D.max()*model.C.weight.data.cpu().numpy(),delimiter=',',fmt='%.5f')
+    np.savetxt(res_path + args.C.rsplit('/',1)[1],model.C.weight.data.cpu().numpy(),delimiter=',',fmt='%.5f')
 
 
 #
@@ -125,12 +125,12 @@ def writeMF():
 #
 alphaY = -1e-8/len(i_loader)
 alphaX = -1e-8/len(j_loader)
-model = MatrixFactorization(m, n, r=r, alphaX=alphaX, alphaY=alphaY, max_C=1)
+model = MatrixFactorization(m, n, r=r, alphaX=alphaX, alphaY=alphaY, max_C=D.max())
 model.to(dev)
 
-D_full = torch.from_numpy(D).float()/D.max()
+D_full = torch.from_numpy(D).float()
 D_full = D_full.to(dev)
-D_true = torch.from_numpy(Y@C@X.T).float()/D.max()
+D_true = torch.from_numpy(Y@C@X.T).float()
 D_true = D_true.to(dev)
 
 optimizerY = torch.optim.SGD([model.Y.weight], lr=0.1) # learning rate
@@ -165,12 +165,14 @@ while phiX+phiY or candidate<5:
         test()
         sys.stdout.flush()
 
-    if epoch ==5000:
-        with torch.no_grad():
-            model.X.weight.round_()
-            model.Y.weight.round_()
-            param_list = [{'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C,    'batch' : select_batch_J},
-                          {'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C,    'batch' : select_batch_I}]
+    if epoch >=4000 and epoch%500==0:
+        model.alphaX*=2
+        model.alphaY*=2
+        #with torch.no_grad():
+        #    model.X.weight.round_()
+        #    model.Y.weight.round_()
+        #    param_list = [{'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C,    'batch' : select_batch_J},
+        #                  {'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C,    'batch' : select_batch_I}]
     epoch+=1
 
 

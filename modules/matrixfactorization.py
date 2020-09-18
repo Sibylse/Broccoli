@@ -9,7 +9,7 @@ class MatrixFactorization(torch.nn.Module):
         self.C = torch.nn.Embedding(r, r)
         torch.nn.init.uniform_(self.Y.weight)
         torch.nn.init.uniform_(self.X.weight)
-        torch.nn.init.uniform_(self.C.weight)
+        torch.nn.init.constant_(self.C.weight,0)
         with torch.no_grad():
           self.X.weight.data = self.X.weight.softmax(1)
           self.Y.weight.data = self.Y.weight.softmax(1)
@@ -62,7 +62,7 @@ class MatrixFactorization(torch.nn.Module):
           L = 2*torch.sqrt((self.X.weight**2).sum()*(self.Y.weight[J,:]**2)).sum()/self.m/I.shape[0]
         else:
           L = 2*torch.sqrt((self.X.weight[I,:]**2).sum()*(self.Y.weight**2)).sum()/J.shape[0]/self.n
-        return 1/4/max(L,0.001)
+        return 1/16/max(L,0.001)
 
     def prox_binary(self, A, lambdas, lr, alpha):
       with torch.no_grad():
