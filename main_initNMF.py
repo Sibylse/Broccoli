@@ -127,11 +127,9 @@ D_true = D_true.to(dev)
 optimizerY = torch.optim.SGD([model.Y.weight], lr=0.1) # learning rate
 optimizerX = torch.optim.SGD([model.X.weight], lr=0.1) # learning rate
 optimizerC = torch.optim.SGD([model.C.weight], lr=0.1)
-param_list = [{'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C, 'batch': select_batch_J},
-              {'optimizer': optimizerX, 'step': model.stepsizeX, 'prox':model.prox_binary_X, 'batch': select_batch_J},
-              {'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C, 'batch':select_batch_I},
-              {'optimizer': optimizerY, 'step': model.stepsizeY, 'prox':model.prox_binary_Y, 'batch': select_batch_I}]
-
+param_list = [{'optimizer': optimizerX, 'step': model.stepsizeX, 'prox':model.prox_pos_X, 'batch' : select_batch_J},
+              {'optimizer': optimizerY, 'step': model.stepsizeY, 'prox':model.prox_pos_Y, 'batch' : select_batch_I}
+              ]
 loss_func = torch.nn.MSELoss()
 epoch = 1
 test()
@@ -139,13 +137,31 @@ phiX=phiY=1
 loss, best_loss = 0, 10000000
 candidate=0
 while phiX+phiY or candidate<5:
-    loss = train(epoch)
-    if epoch % 200 == 0:
+    train(epoch)
+    if epoch == 100: # start binary penalizer
+        param_list = [{'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C,    'batch' : select_batch_J},
+              {'optimizer': optimizerX, 'step': model.stepsizeX, 'prox':model.prox_binary_X, 'batch' : select_batch_J},
+              {'optimizer': optimizerC, 'step': model.stepsizeC, 'prox':model.prox_pos_C,    'batch' : select_batch_I},
+              {'optimizer': optimizerY, 'step': model.stepsizeY, 'prox':model.prox_binary_Y, 'batch' : select_batch_I}
+              ]
+        with torch.no_grad():
+          diag_X = torch.from_numpy(np.percentile(model.X.weight.detach().cpu(),80,axis=0)).float().to(dev)
+          diag_Y = torch.from_numpy(np.percentile(model.Y.weight.detach().cpu(),80,axis=0)).float().to(dev)
+          diag_X[diag_X==0] = 0.01
+          diag_Y[diag_Y==0] = 0.01
+          model.X.weight.data = model.X.weight.data.matmul(torch.diag(diag_X**(-1)))
+          model.Y.weight.data = model.Y.weight.data.matmul(torch.diag(diag_Y**(-1)))
+          model.C.weight.mul_(torch.diag(diag_X*diag_Y))
+          model.C.weight.clamp_(max=model.max_C/10.)
+          model.X.weight.clamp_(max=1)
+          model.Y.weight.clamp_(max=1)
+    if epoch % 200 == 0 or epoch==100:
       with torch.no_grad():
         phiX, phiY = torch.mean(phi(model.X.weight)), torch.mean(phi(model.Y.weight))
         print('--\t\t\tphi(X):\t {:.3f} \tphi(Y): {:.3f}'.format(phiX,phiY))
         if not phiX+phiY:
             candidate+=1
+            loss=loss_func(D_full,model(None,None))
             print("CANDIDATE")
             if loss<best_loss:
                 best_loss = loss

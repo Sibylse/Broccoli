@@ -9,10 +9,11 @@ class MatrixFactorization(torch.nn.Module):
         self.C = torch.nn.Embedding(r, r)
         torch.nn.init.uniform_(self.Y.weight)
         torch.nn.init.uniform_(self.X.weight)
-        torch.nn.init.constant_(self.C.weight,0)
-        with torch.no_grad():
-          self.X.weight.data = self.X.weight.softmax(1)
-          self.Y.weight.data = self.Y.weight.softmax(1)
+        torch.nn.init.eye_(self.C.weight)
+#        with torch.no_grad():
+#          self.C.weight.mul_(0.1)
+          #self.X.weight.data = self.X.weight.softmax(1)
+          #self.Y.weight.data = self.Y.weight.softmax(1)
         self.register_buffer("lambdasY",torch.zeros_like(self.Y.weight))
         self.register_buffer("lambdasX",torch.zeros_like(self.X.weight))
         self.alphaX = alphaX
@@ -20,6 +21,7 @@ class MatrixFactorization(torch.nn.Module):
         self.max_C = max_C
         self.n=n
         self.m=m
+        self.r=r
 
     def forward(self, J,I):
         if J is None and I is None:
@@ -59,9 +61,9 @@ class MatrixFactorization(torch.nn.Module):
         if J is None and I is None:
           L = 2*torch.sqrt((self.X.weight**2).sum()*(self.Y.weight**2).sum())/self.n/self.m
         elif I is None:
-          L = 2*torch.sqrt((self.X.weight**2).sum()*(self.Y.weight[J,:]**2)).sum()/self.m/I.shape[0]
+          L = 2*torch.sqrt((self.X.weight**2).sum()*(self.Y.weight[J,:]**2)).sum()/J.shape[0]/self.n
         else:
-          L = 2*torch.sqrt((self.X.weight[I,:]**2).sum()*(self.Y.weight**2)).sum()/J.shape[0]/self.n
+          L = 2*torch.sqrt((self.X.weight[I,:]**2).sum()*(self.Y.weight**2)).sum()/self.m/I.shape[0]
         return 1/16/max(L,0.001)
 
     def prox_binary(self, A, lambdas, lr, alpha):
@@ -96,4 +98,13 @@ class MatrixFactorization(torch.nn.Module):
 
     def prox_pos_C(self, lr, J,I):
       with torch.no_grad():
+        self.C.weight[self.C.weight<0.01]=0
         self.C.weight.clamp_(0,self.max_C)
+
+    def prox_pos_X(self, lr, J,I):
+      with torch.no_grad():
+        self.X.weight.clamp_(min=0)
+
+    def prox_pos_Y(self, lr, J,I):
+      with torch.no_grad():
+        self.Y.weight.clamp_(min=0)
