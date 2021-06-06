@@ -125,10 +125,12 @@ print('The mse  of the zero model is {:.3f}'.format(mse0.item()))
 optimizerY = torch.optim.SGD([model.Y.weight], lr=0.1) # learning rate
 optimizerX = torch.optim.SGD([model.X.weight], lr=0.1) # learning rate
 optimizerC = torch.optim.SGD([model.C.weight], lr=0.1, weight_decay = lam_C)
-param_list = [{'optimizer': optimizerX, 'L': model.L_X, 'prox':model.prox_pos_X, 'batch' : select_batch_J},
-              {'optimizer': optimizerY, 'L': model.L_Y, 'prox':model.prox_pos_Y, 'batch' : select_batch_I}
+param_list = [{'optimizer': optimizerC, 'L': model.L_C, 'prox':model.prox_pos_C,    'batch' : select_batch_J},
+              {'optimizer': optimizerX, 'L': model.L_X, 'prox':model.prox_binary_X, 'batch' : select_batch_J},
+              {'optimizer': optimizerC, 'L': model.L_C, 'prox':model.prox_pos_C,    'batch' : select_batch_I},
+              {'optimizer': optimizerY, 'L': model.L_Y, 'prox':model.prox_binary_Y, 'batch' : select_batch_I}
               ]
-min_L = 1e-8
+min_L = 1e-3
 loss_func = torch.nn.MSELoss()
 epoch = 1
 phiX=phiY=1
@@ -136,28 +138,6 @@ loss, best_loss = 0, 10000000
 candidate=0
 while phiX+phiY or candidate<5:
     train(epoch)
-    if epoch == 100: # start binary penalizer
-        param_list = [{'optimizer': optimizerC, 'L': model.L_C, 'prox':model.prox_pos_C,    'batch' : select_batch_J},
-              {'optimizer': optimizerX, 'L': model.L_X, 'prox':model.prox_binary_X, 'batch' : select_batch_J},
-              {'optimizer': optimizerC, 'L': model.L_C, 'prox':model.prox_pos_C,    'batch' : select_batch_I},
-              {'optimizer': optimizerY, 'L': model.L_Y, 'prox':model.prox_binary_Y, 'batch' : select_batch_I}
-              ]
-        with torch.no_grad():
-          diag_X = torch.from_numpy(np.percentile(model.X.weight.detach().cpu(),80,axis=0)).float().to(dev)
-          diag_Y = torch.from_numpy(np.percentile(model.Y.weight.detach().cpu(),80,axis=0)).float().to(dev)
-          diag_X[diag_X==0] = 0.01
-          diag_Y[diag_Y==0] = 0.01
-          d = torch.sqrt(diag_X *diag_Y)
-          diag_X += torch.sqrt(1/10*diag_X/d)
-          diag_Y += torch.sqrt(1/10*diag_Y/d)
-          model.X.weight.data = model.X.weight.data.matmul(torch.diag(diag_X**(-1)))
-          model.Y.weight.data = model.Y.weight.data.matmul(torch.diag(diag_Y**(-1)))
-          model.C.weight.data = torch.mm(model.C.weight, torch.diag(diag_X))
-          model.C.weight.data = torch.mm(torch.diag(diag_Y), model.C.weight)
-          model.C.weight.clamp_(max=model.max_C)
-          model.X.weight.clamp_(max=1)
-          model.Y.weight.clamp_(max=1)
-          min_L=1e-3
     if epoch % 200 == 0 or epoch==100:
       with torch.no_grad():
         phiX, phiY = torch.mean(phi(model.X.weight)), torch.mean(phi(model.Y.weight))

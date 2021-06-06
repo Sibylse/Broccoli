@@ -1,0 +1,27 @@
+#!/bin/bash
+source /home/TUE/TUE_20185358/miniconda3/etc/profile.d/conda.sh
+source activate condaenv
+
+r=20
+path='data/RealWorld/20news/'
+D=$path'Data/D.csv'
+
+res=$path'Factors/Broc_NMF/'
+r=15
+echo python3 main_initNMF.py --data $D --r $r --res_path $res$r'/'
+python3 main_initNMF.py --data $D --r $r --res_path $res$r'/'
+
+r=10
+echo python3 main_initNMF.py --data $D --r $r --res_path $res$r'/'
+python3 main_initNMF.py --data $D --r $r --res_path $res$r'/'
+
+r=5
+echo python3 main_initNMF.py --data $D --r $r --res_path $res$r'/'
+python3 main_initNMF.py --data $D --r $r --res_path $res$r'/'
+
+#res=$path'Factors/Broc_RND/'
+#echo python3 main_initRND.py --data $D --r $r --res_path $res
+#python3 main_initRND.py --data $D --r $r --res_path $re
+
+done
+source deactivate
